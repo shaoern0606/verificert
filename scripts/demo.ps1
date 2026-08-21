@@ -1,0 +1,7 @@
+$ErrorActionPreference = "Stop"
+Write-Host "Starting VERIFICERT demo workflow"
+Write-Host "1. npm install"
+Write-Host "2. npm run blockchain"
+Write-Host "3. npm run deploy:local"
+Write-Host "4. cd apps/api; python -m app.db.seed; python -m uvicorn app.main:app --reload"
+Write-Host "5. cd apps/web; npm run dev"

@@ -1,0 +1,24 @@
+{
+  "name": "verificert",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Blockchain-based verifiable digital credential platform with AI fraud detection.",
+  "workspaces": [
+    "apps/web",
+    "contracts",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run api\" \"npm run web\" \"npm run blockchain\"",
+    "web": "npm --workspace apps/web run dev",
+    "api": "cd apps/api && python -m uvicorn app.main:app --reload --port 8000",
+    "blockchain": "npm --workspace contracts run node",
+    "deploy:local": "npm --workspace contracts run deploy:local",
+    "seed": "cd apps/api && python -m app.db.seed",
+    "test": "npm --workspace contracts test && cd apps/api && python -m pytest",
+    "lint": "npm --workspace apps/web run lint && cd apps/api && ruff check app tests"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
