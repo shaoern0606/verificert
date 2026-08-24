@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: verificert
+      POSTGRES_PASSWORD: verificert
+      POSTGRES_DB: verificert
+    ports:
+      - "5432:5432"
+    volumes:
+      - verificert_pg:/var/lib/postgresql/data
+volumes:
+  verificert_pg:
