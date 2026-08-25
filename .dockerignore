@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+.next
+**/.next
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+storage
+apps/api/storage
+.git
+.env
+contracts/cache
+contracts/artifacts
+contracts/typechain-types

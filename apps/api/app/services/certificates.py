@@ -1,3 +1,6 @@
+import csv
+import io
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -24,8 +27,13 @@ from app.models.domain import (
 )
 from app.schemas.domain import CertificateCreate, CertificateSummary, VerificationResponse
 from app.services.blockchain import BlockchainService
+from app.services.certificate_template import generate_certificate_pdf
+from app.services.email import certificate_issued_email, certificate_revoked_email, send_email
 from app.services.hashing import sha256_bytes
 from app.services.id_service import generate_certificate_id
+from app.services.pdf_stamp import stamp_pdf_with_qr
+
+BULK_CSV_REQUIRED_COLUMNS: Final[set[str]] = {"recipient_name", "recipient_email", "course_name", "certificate_title", "certificate_number", "issue_date"}
 
 
 SUPPORTED_DOCUMENT_TYPES: Final[dict[str, tuple[bytes, ...]]] = {
@@ -72,9 +80,12 @@ def _tx_explorer_url(tx_hash: str | None) -> str | None:
 
 
 async def create_and_issue_certificate(db: Session, payload: CertificateCreate, file: UploadFile) -> Certificate:
-    settings = get_settings()
     content = await file.read()
-    content_type = file.content_type or ""
+    return issue_certificate_from_bytes(db, payload, content, file.content_type or "", file.filename)
+
+
+def issue_certificate_from_bytes(db: Session, payload: CertificateCreate, content: bytes, content_type: str, filename: str | None) -> Certificate:
+    settings = get_settings()
     if content_type not in SUPPORTED_DOCUMENT_TYPES or not _has_valid_signature(content_type, content):
         raise ValueError("Only PDF, JPEG, PNG, GIF, or WebP certificates are accepted.")
     if len(content) > settings.max_upload_mb * 1024 * 1024:
@@ -94,6 +105,12 @@ async def create_and_issue_certificate(db: Session, payload: CertificateCreate, 
     )
     db.add(recipient)
     cert_id = generate_certificate_id(db)
+    verification_url = f"{settings.next_public_app_url}/verify/{cert_id}"
+    if content_type == "application/pdf":
+        try:
+            content = stamp_pdf_with_qr(content, verification_url)
+        except Exception as exc:  # malformed PDFs shouldn't block issuance
+            logging.getLogger("verificert").warning("qr_stamp_failed cert_id=%s error=%s", cert_id, exc)
     document_hash = sha256_bytes(content)
     cert_dir = Path(settings.storage_path) / "certificates"
     cert_dir.mkdir(parents=True, exist_ok=True)
@@ -101,13 +118,12 @@ async def create_and_issue_certificate(db: Session, payload: CertificateCreate, 
     storage_path = cert_dir / f"{cert_id}{extension}"
     storage_path.write_bytes(content)
     cert_file = CertificateFile(
-        original_filename=file.filename or f"{cert_id}.pdf",
+        original_filename=filename or f"{cert_id}.pdf",
         storage_path=str(storage_path),
         content_type=content_type,
         size_bytes=len(content),
         document_hash=document_hash,
     )
-    verification_url = f"{settings.next_public_app_url}/verify/{cert_id}"
     receipt = blockchain.issue_certificate(cert_id, document_hash, payload.expiry_date, verification_url, signer=signer)
     tx = BlockchainTransaction(
         network=receipt.network,
@@ -136,10 +152,111 @@ async def create_and_issue_certificate(db: Session, payload: CertificateCreate, 
     db.add_all([cert_file, tx, cert, AuditLog(actor=issuer.email, role="ISSUER", action=AuditAction.ISSUE_CERTIFICATE, certificate_id=cert_id)])
     db.commit()
     db.refresh(cert)
+    send_email(recipient.email, f"Your certificate: {cert.title}", certificate_issued_email(recipient.name, cert.title, issuer.organization.name, verification_url))
     return cert
 
 
-def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes | None = None, ip: str | None = None) -> VerificationResponse:
+def bulk_issue_certificates(db: Session, issuer_id: str, csv_bytes: bytes) -> dict:
+    issuer = db.get(Issuer, issuer_id)
+    if not issuer:
+        raise ValueError("Issuer not found.")
+    reader = csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig")))
+    columns = set(reader.fieldnames or [])
+    missing = BULK_CSV_REQUIRED_COLUMNS - columns
+    if missing:
+        raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
+    issued: list[dict] = []
+    failed: list[dict] = []
+    for index, row in enumerate(reader, start=2):  # row 1 is the header
+        try:
+            issue_date = datetime.fromisoformat(row["issue_date"].strip())
+            expiry_raw = (row.get("expiry_date") or "").strip()
+            expiry_date = datetime.fromisoformat(expiry_raw) if expiry_raw else None
+            payload = CertificateCreate(
+                recipient_name=row["recipient_name"].strip(),
+                recipient_email=row["recipient_email"].strip(),
+                course_name=row["course_name"].strip(),
+                certificate_title=row["certificate_title"].strip(),
+                issue_date=issue_date,
+                expiry_date=expiry_date,
+                certificate_number=row["certificate_number"].strip(),
+                description=(row.get("description") or "").strip() or None,
+                issuer_id=issuer_id,
+            )
+            pdf_bytes = generate_certificate_pdf(
+                recipient_name=payload.recipient_name,
+                course_name=payload.course_name,
+                certificate_title=payload.certificate_title,
+                organization_name=issuer.organization.name,
+                certificate_number=payload.certificate_number,
+                issue_date=issue_date.date().isoformat(),
+            )
+            cert = issue_certificate_from_bytes(db, payload, pdf_bytes, "application/pdf", f"{payload.certificate_number}.pdf")
+            issued.append({"row": index, "certificate_id": cert.certificate_id, "recipient_email": payload.recipient_email})
+        except Exception as exc:
+            db.rollback()
+            failed.append({"row": index, "error": str(exc)})
+    return {"issued": issued, "failed": failed}
+
+
+def _expected_metadata(cert: Certificate) -> dict:
+    return {
+        "recipient_name": cert.recipient.name,
+        "course_name": cert.program_name,
+        "certificate_title": cert.title,
+        "certificate_number": cert.certificate_number,
+        "issuer_organization": cert.organization.name,
+    }
+
+
+def _ai_state_fields(db: Session, cert: Certificate, uploaded_bytes: bytes | None = None, uploaded_content_type: str | None = None) -> dict:
+    if uploaded_bytes:
+        return {
+            "document_bytes": uploaded_bytes,
+            "document_content_type": uploaded_content_type or cert.file.content_type,
+            "expected_metadata": _expected_metadata(cert),
+        }
+    latest = db.scalar(
+        select(AIAnalysisResult).where(AIAnalysisResult.certificate_id == cert.certificate_id).order_by(AIAnalysisResult.created_at.desc())
+    )
+    cached = latest.result.get("ai_document_review") if latest else None
+    if cached and cached.get("document_hash") == cert.file.document_hash:
+        return {
+            "ai_available": cached["available"],
+            "metadata_match": cached["metadata_match"],
+            "extracted_metadata": cached["extracted_fields"],
+            "ai_issues": cached["ai_issues"],
+            "ai_notes": cached["ai_notes"],
+        }
+    try:
+        document_bytes = Path(cert.file.storage_path).read_bytes()
+    except OSError:
+        return {}
+    return {
+        "document_bytes": document_bytes,
+        "document_content_type": cert.file.content_type,
+        "expected_metadata": _expected_metadata(cert),
+    }
+
+
+def verify_by_document(db: Session, content: bytes, content_type: str | None = None, ip: str | None = None, actor: str = "public") -> VerificationResponse:
+    document_hash = sha256_bytes(content)
+    cert = db.scalar(select(Certificate).join(CertificateFile, Certificate.file_id == CertificateFile.id).where(CertificateFile.document_hash == document_hash))
+    if cert:
+        return verify_certificate(db, cert.certificate_id, uploaded_bytes=content, uploaded_content_type=content_type, ip=ip, actor=actor)
+    response = VerificationResponse(
+        status=VerificationStatus.NOT_FOUND,
+        certificate_id="",
+        decisive_reason="No certificate matches this document's hash.",
+        checks={"certificate_exists": False, "issuer_recognized": False, "blockchain_record_found": False, "hash_matches": False},
+        technical_details={"uploaded_hash": document_hash},
+    )
+    db.add(VerificationAttempt(certificate_id="", uploaded_hash=document_hash, outcome=response.status, ip_address=ip, details=response.model_dump(mode="json")))
+    db.commit()
+    return response
+
+
+def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes | None = None, uploaded_content_type: str | None = None, ip: str | None = None, actor: str = "public") -> VerificationResponse:
     cert = db.scalar(select(Certificate).where(Certificate.certificate_id == certificate_id))
     uploaded_hash = sha256_bytes(uploaded_bytes) if uploaded_bytes else None
     if not cert:
@@ -178,12 +295,16 @@ def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes |
     )
     blockchain_found = bool(chain_record.get("record_found"))
     chain_revoked = bool(chain_record.get("revoked"))
+    # The chain has no record for this certificate (e.g. a local dev chain was reset after
+    # issuance) but our own database still has the last known administrative status — trust
+    # that over silently reporting "not revoked" just because the chain lookup came back empty.
+    revoked = chain_revoked or (not blockchain_found and cert.status == CertificateStatus.REVOKED)
     chain_expires_at = int(chain_record.get("expires_at") or 0)
     now = datetime.utcnow()
     expired = (chain_expires_at > 0 and chain_expires_at < int(now.timestamp())) or (chain_expires_at == 0 and cert.expiry_date is not None and cert.expiry_date < now)
-    if chain_revoked:
+    if revoked:
         status = VerificationStatus.REVOKED
-        reason = "Certificate has been revoked on-chain."
+        reason = "Certificate has been revoked on-chain." if chain_revoked else "Certificate was revoked; the blockchain record is currently unavailable to confirm it live."
     elif not blockchain_found:
         status = VerificationStatus.PENDING
         reason = "Blockchain record is missing or unavailable; this certificate cannot be commercially verified yet."
@@ -205,11 +326,19 @@ def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes |
             "hash_match": hash_matches,
             "issuer_match": issuer_recognized,
             "blockchain_record_found": blockchain_found,
-            "revoked": chain_revoked,
+            "revoked": revoked,
             "expired": expired,
-            "metadata_match": True,
+            **_ai_state_fields(db, cert, uploaded_bytes, uploaded_content_type),
         }
     )
+    ai_document_review = {
+        "document_hash": cert.file.document_hash if (not uploaded_bytes or hash_matches) else None,
+        "available": ai.ai_available,
+        "metadata_match": ai.metadata_match,
+        "extracted_fields": ai.extracted_metadata,
+        "ai_issues": ai.ai_discrepancies,
+        "ai_notes": ai.unknowns,
+    }
     response = VerificationResponse(
         status=status,
         certificate_id=certificate_id,
@@ -219,7 +348,7 @@ def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes |
             "issuer_recognized": issuer_recognized,
             "blockchain_record_found": blockchain_found,
             "hash_matches": hash_matches,
-            "not_revoked": not chain_revoked,
+            "not_revoked": not revoked,
             "not_expired": not expired,
         },
         certificate=_summary(cert),
@@ -243,8 +372,13 @@ def verify_certificate(db: Session, certificate_id: str, uploaded_bytes: bytes |
     db.add_all(
         [
             VerificationAttempt(certificate_id=certificate_id, uploaded_hash=uploaded_hash, outcome=status, ip_address=ip, details=response.model_dump(mode="json")),
-            AuditLog(actor="public", role="VERIFIER", action=AuditAction.VERIFY_CERTIFICATE, certificate_id=certificate_id, ip_address=ip),
-            AIAnalysisResult(certificate_id=certificate_id, risk_score=ai.risk_score, risk_level=ai.risk_level, result=ai.model_dump()),
+            AuditLog(actor=actor, role="VERIFIER", action=AuditAction.VERIFY_CERTIFICATE, certificate_id=certificate_id, ip_address=ip),
+            AIAnalysisResult(
+                certificate_id=certificate_id,
+                risk_score=ai.risk_score,
+                risk_level=ai.risk_level,
+                result={**ai.model_dump(), "ai_document_review": ai_document_review},
+            ),
         ]
     )
     db.commit()
@@ -270,6 +404,7 @@ def revoke_certificate(db: Session, certificate_id: str, reason: str, signer=Non
     db.add_all([tx, AuditLog(actor=cert.issuer.email, role="ISSUER", action=AuditAction.REVOKE_CERTIFICATE, certificate_id=certificate_id)])
     db.commit()
     db.refresh(cert)
+    send_email(cert.recipient.email, f"Certificate revoked: {cert.title}", certificate_revoked_email(cert.recipient.name, cert.title, cert.organization.name, reason))
     return cert
 
 

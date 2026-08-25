@@ -10,9 +10,7 @@ export default function IssuerDashboard() {
   const [profile, setProfile] = useState<{ organization: string; status: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    const token = window.localStorage.getItem("verificert_token");
-    if (!token) { setError("Sign in as an issuer to load workspace data."); return; }
-    Promise.all([getIssuerDashboard(token), getMyIssuer(token)]).then(([dashboard, issuer]) => { setData(dashboard); setProfile(issuer); }).catch(() => setError("Unable to load workspace data from the backend."));
+    Promise.all([getIssuerDashboard(), getMyIssuer()]).then(([dashboard, issuer]) => { setData(dashboard); setProfile(issuer); }).catch(() => setError("Unable to load workspace data from the backend."));
   }, []);
   return (
     <AppShell>
@@ -29,7 +27,10 @@ export default function IssuerDashboard() {
       </div>
       <div className="mt-6 flex flex-wrap gap-3">
         <Link href="/issuer/certificates/new" className="inline-flex rounded bg-trust px-4 py-2 font-semibold text-white">Issue Certificate</Link>
+        <Link href="/issuer/certificates/bulk" className="inline-flex rounded border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700">Bulk Issue (CSV)</Link>
         <Link href="/issuer/certificates" className="inline-flex rounded border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700">View Issued Certificates</Link>
+        <Link href="/issuer/verification-history" className="inline-flex rounded border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700">Verification History</Link>
+        <Link href="/issuer/settings" className="inline-flex rounded border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700">Issuer Settings</Link>
       </div>
     </AppShell>
   );

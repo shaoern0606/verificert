@@ -130,6 +130,7 @@ class Certificate(Base):
     qr_payload: Mapped[str] = mapped_column(String(500))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
     revocation_reason: Mapped[str | None] = mapped_column(Text)
+    expiry_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     issuer: Mapped[Issuer] = relationship()
     recipient: Mapped[Recipient] = relationship()
@@ -180,3 +181,15 @@ class IssuerWallet(Base):
     wallet_address: Mapped[str] = mapped_column(String(80))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     __table_args__ = (UniqueConstraint("issuer_id", "wallet_address", name="uq_issuer_wallet"),)
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    label: Mapped[str] = mapped_column(String(120))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(24))
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)

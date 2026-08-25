@@ -7,6 +7,7 @@ except Exception:  # pragma: no cover
     StateGraph = None
 
 from app.schemas.domain import VerificationRiskAssessment
+from app.services.ai_review import analyze_certificate_document
 
 
 class VerificationState(TypedDict, total=False):
@@ -18,7 +19,37 @@ class VerificationState(TypedDict, total=False):
     expired: bool
     metadata_match: bool
     extracted_metadata: dict
+    ai_available: bool
+    ai_issues: list[str]
+    ai_notes: list[str]
+    document_bytes: bytes | None
+    document_content_type: str | None
+    expected_metadata: dict
     risk: VerificationRiskAssessment
+
+
+def _extract_metadata(state: VerificationState) -> VerificationState:
+    if "metadata_match" in state:
+        return state
+    document_bytes = state.get("document_bytes")
+    if not document_bytes:
+        state["ai_available"] = False
+        state["metadata_match"] = True
+        state["extracted_metadata"] = {}
+        state["ai_issues"] = []
+        state["ai_notes"] = []
+        return state
+    review = analyze_certificate_document(document_bytes, state.get("document_content_type") or "application/pdf", state.get("expected_metadata", {}))
+    state["ai_available"] = review["available"]
+    state["metadata_match"] = review["metadata_match"]
+    state["extracted_metadata"] = review["extracted_fields"]
+    state["ai_issues"] = [*review["discrepancies"], *review["tamper_signals"]]
+    state["ai_notes"] = [review["note"]] if review.get("note") else []
+    return state
+
+
+def _visual_consistency_check(state: VerificationState) -> VerificationState:
+    return state
 
 
 def _assess(state: VerificationState) -> VerificationState:
@@ -41,9 +72,22 @@ def _assess(state: VerificationState) -> VerificationState:
     if not state.get("issuer_match", True):
         issues.append("Issuer metadata does not match the registered issuer.")
         score = max(score, 70)
+    if not state.get("metadata_match", True):
+        issues.append("AI document review found metadata that does not match the registered certificate.")
+        score = max(score, 65)
+    issues.extend(state.get("ai_issues", []))
     if not issues:
         recommendations.append("Credential can be accepted with normal due diligence.")
     level = "LOW" if score < 25 else "MEDIUM" if score < 60 else "HIGH" if score < 90 else "CRITICAL"
+    facts = [
+        f"Certificate ID: {state.get('certificate_id', 'UNKNOWN')}",
+        f"Document hash match: {state.get('hash_match', False)}",
+    ]
+    if state.get("extracted_metadata"):
+        facts.append(f"AI-extracted metadata: {state['extracted_metadata']}")
+    inferences = ["Risk score is derived from deterministic verification evidence."]
+    if state.get("ai_available"):
+        inferences.append("Certificate document was cross-checked against the registered record using Gemini multimodal review.")
     state["risk"] = VerificationRiskAssessment(
         risk_score=score,
         risk_level=level,
@@ -55,20 +99,26 @@ def _assess(state: VerificationState) -> VerificationState:
         expired=state.get("expired", False),
         issues=issues,
         recommendations=recommendations,
-        facts=[
-            f"Certificate ID: {state.get('certificate_id', 'UNKNOWN')}",
-            f"Document hash match: {state.get('hash_match', False)}",
-        ],
-        inferences=["Risk score is derived from deterministic verification evidence."],
-        unknowns=[],
+        facts=facts,
+        inferences=inferences,
+        unknowns=state.get("ai_notes", []),
+        ai_available=state.get("ai_available", False),
+        metadata_match=state.get("metadata_match", True),
+        extracted_metadata=state.get("extracted_metadata", {}),
+        ai_discrepancies=state.get("ai_issues", []),
     )
     return state
 
 
 def run_verification_graph(state: VerificationState) -> VerificationRiskAssessment:
     if StateGraph is None:
-        return _assess(state)["risk"]
+        return _assess(_visual_consistency_check(_extract_metadata(state)))["risk"]
     graph = StateGraph(VerificationState)
+    node_fns = {
+        "metadata_extraction": _extract_metadata,
+        "visual_consistency_check": _visual_consistency_check,
+        "risk_assessment": _assess,
+    }
     for node in [
         "document_ingestion",
         "metadata_extraction",
@@ -79,7 +129,7 @@ def run_verification_graph(state: VerificationState) -> VerificationRiskAssessme
         "risk_assessment",
         "final_result",
     ]:
-        graph.add_node(node, _assess if node == "risk_assessment" else lambda s: s)
+        graph.add_node(node, node_fns.get(node, lambda s: s))
     graph.add_edge(START, "document_ingestion")
     graph.add_edge("document_ingestion", "metadata_extraction")
     graph.add_edge("metadata_extraction", "issuer_check")

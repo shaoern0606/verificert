@@ -12,16 +12,15 @@ export default function NewCertificatePage() {
   const [issuerStatus, setIssuerStatus] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState(false);
-  useEffect(() => { const token = window.localStorage.getItem("verificert_token"); if (!token) return; setSignedIn(true); getMyIssuer(token).then((issuer) => { setIssuerId(issuer.id); setIssuerStatus(issuer.status); }).catch(() => setMessage("Unable to load the issuer profile.")); }, []);
+  useEffect(() => { getMyIssuer().then((issuer) => { setSignedIn(true); setIssuerId(issuer.id); setIssuerStatus(issuer.status); }).catch(() => setSignedIn(false)); }, []);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const token = window.localStorage.getItem("verificert_token");
-    if (!token) { setMessage("Sign in as an issuer before issuing a certificate."); return; }
+    if (!signedIn) { setMessage("Sign in as an issuer before issuing a certificate."); return; }
     const form = new FormData(event.currentTarget);
     form.set("issuer_id", issuerId);
     let response: Response;
     try {
-      response = await fetch(`${API_URL}/api/certificates`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      response = await fetch(`${API_URL}/api/certificates`, { method: "POST", credentials: "include", body: form });
     } catch {
       setMessage("The API is unavailable. Check that the backend is running.");
       return;

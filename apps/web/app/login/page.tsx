@@ -28,6 +28,7 @@ export default function LoginPage() {
           try {
             response = await fetch(`${API_URL}/api/auth/login`, {
               method: "POST",
+              credentials: "include",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
             });
@@ -41,10 +42,9 @@ export default function LoginPage() {
             setError(response.status === 401 ? "Email or password is incorrect." : "The sign-in service returned an error.");
             return;
           }
-          const token = await response.json();
-          window.localStorage.setItem("verificert_token", token.access_token);
-          window.localStorage.setItem("verificert_role", token.role);
-          router.push(token.role === "ADMIN" ? "/admin" : token.role === "ISSUER" ? "/issuer" : "/recipient");
+          const session = await response.json();
+          window.localStorage.setItem("verificert_role", session.role);
+          router.push(session.role === "ADMIN" ? "/admin" : session.role === "ISSUER" ? "/issuer" : "/recipient");
         }}
       >
         <h1 className="text-2xl font-bold">Sign in{requestedRole ? ` as ${requestedRole.toLowerCase()}` : ""}</h1>

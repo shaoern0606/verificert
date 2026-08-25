@@ -12,8 +12,16 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://verificert:verificert@localhost:5432/verificert"
     jwt_secret: str
     jwt_algorithm: str = "HS256"
-    jwt_minutes: int = 60
+    jwt_minutes: int = 30
+    access_token_cookie_name: str = "access_token"
+    cookie_secure: bool = True
+    cors_origins: str = "http://localhost:3000,https://localhost:3000"
     openai_api_key: str | None = None
+    google_api_key: str | None = None
+    google_ai_model: str = "gemini-2.5-flash"
+    resend_api_key: str | None = None
+    email_from: str = "VerifiCert <onboarding@resend.dev>"
+    certificate_expiry_reminder_days: int = 30
     blockchain_rpc_url: str = "http://127.0.0.1:8545"
     blockchain_private_key: str | None = None
     blockchain_admin_private_key: str | None = None
@@ -42,6 +50,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

@@ -10,9 +10,7 @@ export default function RecipientPage() {
   const [certificates, setCertificates] = useState<CertificateListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    const token = window.localStorage.getItem("verificert_token");
-    if (!token) { setError("Sign in as a recipient to load certificates."); return; }
-    getRecipientCertificates(token).then(setCertificates).catch(() => setError("Unable to load certificates from the backend."));
+    getRecipientCertificates().then(setCertificates).catch(() => setError("Unable to load certificates from the backend."));
   }, []);
   return (
     <AppShell>

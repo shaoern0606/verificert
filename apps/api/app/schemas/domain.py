@@ -15,16 +15,16 @@ class VerificationStatus(str, Enum):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
     token_type: str = "bearer"
     role: str
+    email: str
+    full_name: str
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str
-    role: str = "RECIPIENT"
 
 
 class LoginRequest(BaseModel):
@@ -32,11 +32,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RoleUpdateRequest(BaseModel):
+    role: str
+
+
+class ApiKeyCreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+
+
 class IssuerCreate(BaseModel):
     organization_name: str
     registration_number: str | None = None
     contact_person: str
-    email: EmailStr
     website: str | None = None
     wallet_address: str
     description: str | None = None
@@ -81,6 +88,10 @@ class VerificationRiskAssessment(BaseModel):
     facts: list[str] = []
     inferences: list[str] = []
     unknowns: list[str] = []
+    ai_available: bool = False
+    metadata_match: bool = True
+    extracted_metadata: dict = {}
+    ai_discrepancies: list[str] = []
 
 
 class VerificationResponse(BaseModel):

@@ -18,14 +18,14 @@ export default function RegisterPage() {
     const form = new FormData(event.currentTarget);
     const response = await fetch(`${API_URL}/api/auth/register`, {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ full_name: form.get("full_name"), email: form.get("email"), password: form.get("password"), role: "RECIPIENT" }),
+      body: JSON.stringify({ full_name: form.get("full_name"), email: form.get("email"), password: form.get("password") }),
     });
     setLoading(false);
     if (!response.ok) { setError("This account could not be created."); return; }
-    const token = await response.json();
-    window.localStorage.setItem("verificert_token", token.access_token);
-    window.localStorage.setItem("verificert_role", token.role);
+    const session = await response.json();
+    window.localStorage.setItem("verificert_role", session.role);
     router.push("/recipient");
   }
   return (
